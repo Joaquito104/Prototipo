@@ -1,12 +1,23 @@
 <!DOCTYPE html>
 <html lang="es">
-<head><meta charset="UTF-8"><title>Eliminar Producto</title></head>
+<head>
+  <meta charset="UTF-8">
+  <title>Eliminar Producto</title>
+</head>
 <body>
   <h1>Eliminar Producto</h1>
-  <p>¿Estás seguro de que deseas eliminar <strong>{{ producto.nombre }}</strong>?</p>
+
+  <p>
+    ¿Seguro que deseas eliminar el producto
+    <strong>{{ producto.nombre }}</strong>?
+  </p>
+
+  <p><b>Precio:</b> {{ producto.precio }} CLP</p>
+  <p><b>Stock:</b> {{ producto.stock }}</p>
+
   <form method="post">
     {% csrf_token %}
-    <button type="submit">Eliminar</button>
+    <button type="submit">Sí, eliminar</button>
     <a href="{% url 'lista_productos' %}">Cancelar</a>
   </form>
 </body>
