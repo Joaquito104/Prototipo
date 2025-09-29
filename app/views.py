@@ -1,45 +1,73 @@
 from decimal import Decimal
-from django.db.models import Sum, F
-from django.db.models.functions import Coalesce
-from django.shortcuts import render, get_object_or_404, redirect
-from django.views.decorators.http import require_http_methods, require_POST
+from django.shortcuts import render, redirect, get_object_or_404
 from .models import Producto, Venta
 from .forms import ProductoForm
 
-def menu_principal(request):
-    return render(request, 'menu.html')
 
-@require_http_methods(["GET"])
-def lista_productos(request):
-    productos = (
-        Producto.objects
-        .annotate(
-            ventas_cantidad=Coalesce(Sum('ventas__cantidad'), 0),
-            ventas_monto=Coalesce(Sum('ventas__precio_total'), 0),
-        )
-        .order_by('-id')
-    )
+def _inventario_ctx():
+    """
+    Calcula filas de inventario (producto + ventas acumuladas) y totales globales
+    en Python puro para evitar problemas de tipos en BD.
+    """
+    productos = list(Producto.objects.all().order_by("-id"))
 
-    # suma de todas las ventas
-    agregados = Venta.objects.aggregate(
-        total_cantidad=Coalesce(Sum('cantidad'), 0),
-        total_monto=Coalesce(Sum('precio_total'), 0),
-    )
+    filas = []
+    total_cantidad = 0
+    total_monto = Decimal("0")
 
-    ctx = {
-        "productos": productos,
-        "total_cantidad": agregados["total_cantidad"],
-        "total_monto": agregados["total_monto"],
+    for p in productos:
+        ventas = list(p.ventas.all())
+        ventas_cantidad = sum(v.cantidad for v in ventas)
+        ventas_monto = sum(v.precio_total for v in ventas) if ventas else Decimal("0")
+
+        filas.append({
+            "obj": p,
+            "ventas_cantidad": ventas_cantidad,
+            "ventas_monto": ventas_monto,
+        })
+
+        total_cantidad += ventas_cantidad
+        total_monto += ventas_monto
+
+    return {
+        "filas": filas,
+        "total_cantidad": total_cantidad,
+        "total_monto": total_monto,
     }
-    return render(request, "productos/lista.html", ctx)
 
 
-@require_POST
+def menu_principal(request):
+    """
+    Menú con pestañas: ?tab=crear | lista | eliminar
+    Mantiene la misma página y muestra el contenido debajo.
+    """
+    tab = request.GET.get("tab", "lista")  # por defecto 'lista'
+
+    ctx = {"tab": tab}
+
+    if tab in ("lista", "eliminar"):
+        ctx.update(_inventario_ctx())
+    if tab == "crear":
+        ctx["form"] = ProductoForm()
+
+    return render(request, "menu.html", ctx)
+
+
+# --- Rutas “clásicas” opcionales (por compatibilidad) ---
+
+def lista_productos(request):
+    ctx = _inventario_ctx()
+    return render(request, "productos/lista_productos.html", ctx)
+
+
 def registrar_ventas(request):
     """
-    Lee las cantidades a vender por producto desde el formulario,
-    crea la Venta correspondiente, descuenta stock y redirige a la lista.
+    Registra ventas en lote (una cantidad por producto) y descuenta stock.
+    Redirige a 'next' si viene en POST/GET, o a la lista por defecto.
     """
+    if request.method != "POST":
+        return redirect("lista_productos")
+
     for p in Producto.objects.all():
         key = f"cantidad_{p.id}"
         raw = request.POST.get(key)
@@ -52,16 +80,15 @@ def registrar_ventas(request):
         if cantidad <= 0:
             continue
 
-        if p.stock < cantidad:
+        # Ajusta a stock disponible (o cambia por validación si prefieres)
+        if cantidad > p.stock:
             cantidad = p.stock
-
         if cantidad <= 0:
             continue
 
         precio_unitario = Decimal(p.precio)
         precio_total = precio_unitario * cantidad
 
-        # Crear la venta
         Venta.objects.create(
             producto=p,
             cantidad=cantidad,
@@ -69,27 +96,37 @@ def registrar_ventas(request):
             precio_total=precio_total,
         )
 
-        p.stock = F('stock') - cantidad
+        p.stock = p.stock - cantidad
         p.save(update_fields=["stock"])
 
-    return redirect("lista_productos")
+    next_url = request.POST.get("next") or request.GET.get("next")
+    return redirect(next_url or "lista_productos")
+
 
 def crear_producto(request):
+    """
+    Crea producto y redirige a 'next' (si viene) o a la lista.
+    """
     if request.method == "POST":
         form = ProductoForm(request.POST)
         if form.is_valid():
-            form.save()  # crea y guarda en la base de datos
-            return redirect('lista_productos')  # vuelve a la lista
+            form.save()
+            next_url = request.POST.get("next") or request.GET.get("next")
+            return redirect(next_url or "lista_productos")
     else:
         form = ProductoForm()
-    return render(request, 'productos/crear_productos.html', {'form': form})
+    return render(request, "productos/crear_productos.html", {"form": form})
+
 
 def eliminar_producto(request, pk):
+    """
+    Confirmación y eliminación de producto; vuelve a 'next' o a la lista.
+    """
     producto = get_object_or_404(Producto, pk=pk)
 
-    if request.method == 'POST':
-        producto.delete()  # borra el producto de la base de datos
-        return redirect('lista_productos')
+    if request.method == "POST":
+        producto.delete()
+        next_url = request.POST.get("next") or request.GET.get("next")
+        return redirect(next_url or "lista_productos")
 
-    # Si el método es GET, solo muestra la página de confirmación
-    return render(request, 'productos/eliminar_productos.html', {'producto': producto})
+    return render(request, "productos/eliminar_productos.html", {"producto": producto})
